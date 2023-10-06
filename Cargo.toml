@@ -1,0 +1,20 @@
+[package]
+name = "scan"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+aes = "0.8.3"
+clap = { version = "4.4.2", features = ["derive"]}
+flume = "0.11.0"
+log = "0.4.20"
+pnet = "0.34.0"
+pnet_base = "0.34.0"
+pnet_datalink = "0.34.0"
+pnet_packet = "0.34.0"
+pnet_transport = "0.34.0"
+pretty_env_logger = "0.5.0"
+rand = "0.8.5"
+thiserror = "1.0.48"
