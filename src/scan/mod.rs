@@ -1,143 +1,88 @@
-use flume::{bounded, Receiver, Sender};
-use std::{net::SocketAddr, thread, time::Duration};
+use std::thread; 
+use crate::SharedRunState;
+use std::sync::mpsc::{Receiver, Sender};
 
 use self::{
     cookie::CookieHasher,
-    logger::{Logger, LoggerControlMessage, LoggerHandler},
-    packet_receiver::{PacketReceiver, PacketReceiverHandler},
-    packet_sender::{PacketSender, PacketSenderHandler},
-    utils::InterfaceData,
+    logger::Logger,
+    packet_receiver::PacketReceiver,
+    packet_sender::PacketSender,
+    network_data::InterfaceData, output::{OutputHandle, Output},
 };
-
-extern crate pretty_env_logger;
 
 pub mod cookie;
 pub mod lcg;
 pub mod logger;
 pub mod packet_receiver;
 pub mod packet_sender;
-pub mod utils;
-
-#[derive(Debug)]
-pub enum ScannerControlMessage {
-    Pause,
-    Die,
-}
+pub mod output;
+pub mod network_data;
 
 pub struct Scanner {
     packet_sender: PacketSender,
-    packet_sender_handler: PacketSenderHandler,
     packet_receiver: PacketReceiver,
-    packet_receiver_handler: PacketReceiverHandler,
+    packet_receiver_control_tx: ControlTx, 
     logger: Logger,
-    logger_handler: LoggerHandler,
-    rendezvous_control_rx: Receiver<ScannerControlMessage>,
-    product_tx: Sender<SocketAddr>,
+    logger_control_tx: ControlTx,
+    output: Box<dyn Output + Send>,
+    output_control_tx: ControlTx
 }
 
-#[derive(Debug)]
-pub(crate) struct ScannerHandler {
-    pub(crate) rendezvous_control_tx: Sender<ScannerControlMessage>,
-    pub(crate) product_rx: Receiver<SocketAddr>,
+pub enum ThreadControlMessage {
+    Die, 
 }
+
+pub type ControlTx = Sender<ThreadControlMessage>; 
+pub type ControlRx = Receiver<ThreadControlMessage>;
 
 impl Scanner {
-    pub(crate) fn new(port: u16, interface_data: InterfaceData) -> (Self, ScannerHandler) {
+    pub(crate) fn new(port: u16, interface_data: InterfaceData, run_state: SharedRunState, output: Box<dyn Output + Send>, output_handle: OutputHandle) -> Self {
         let cookie_hasher = CookieHasher::new();
 
-        let (logger, stats, logger_handler) = Logger::new();
+        let (logger, stats, logger_control_tx) = Logger::new(run_state.clone());
 
-        let (packet_sender, packet_sender_handler) = PacketSender::new(
+        let packet_sender = PacketSender::new(
             cookie_hasher.clone(),
             port,
             interface_data.clone(),
             stats.clone(),
+            run_state.clone(),
         );
-        let (packet_receiver, packet_receiver_handler) = PacketReceiver::new(
+
+        let (packet_receiver, packet_receiver_control_tx) = PacketReceiver::new(
             cookie_hasher.clone(),
             port,
             interface_data.clone(),
             stats.clone(),
+            run_state,
+            output_handle.out_tx, 
         );
 
-        let (rendezvous_control_tx, rendezvous_control_rx) = bounded(0);
-
-        let (product_tx, product_rx) = bounded(5);
-
-        let scanner_handler = ScannerHandler {
-            rendezvous_control_tx,
-            product_rx,
-        };
 
         let scanner = Scanner {
             packet_sender,
-            packet_sender_handler,
+            packet_receiver_control_tx, 
             packet_receiver,
-            packet_receiver_handler,
             logger,
-            logger_handler,
-            rendezvous_control_rx,
-            product_tx,
+            logger_control_tx,
+            output,
+            output_control_tx: output_handle.control_tx
         };
-
-        (scanner, scanner_handler)
+        
+        scanner
     }
-
     pub(crate) fn scan(mut self) {
+        let output_handle = thread::spawn(move || self.output.output()); 
         let receiver_handle = thread::spawn(move || self.packet_receiver.receive());
         let sender_handle = thread::spawn(move || self.packet_sender.send());
         let logger_handle = thread::spawn(move || self.logger.log());
 
-        while !sender_handle.is_finished() {
-            if let Ok(socket) = self.packet_receiver_handler.product_rx.try_recv() {
-                self.product_tx.send(socket).unwrap();
-            }
-
-            if let Ok(message) = self.rendezvous_control_rx.try_recv() {
-                match message {
-                    ScannerControlMessage::Pause => {
-                        self.packet_sender_handler
-                            .rendezvous_control_tx
-                            .send(packet_sender::PacketSenderControlMessage::Pause)
-                            .unwrap();
-
-                        std::thread::sleep(Duration::new(5, 0));
-
-                        self.packet_receiver_handler
-                            .rendezvous_control_tx
-                            .send(packet_receiver::PacketReceiverControlMessage::Pause)
-                            .unwrap();
-
-                        self.logger_handler
-                            .send(LoggerControlMessage::Pause)
-                            .unwrap();
-
-                        thread::park();
-                        receiver_handle.thread().unpark();
-                        sender_handle.thread().unpark();
-                        logger_handle.thread().unpark();
-                    }
-                    ScannerControlMessage::Die => {
-                        self.packet_sender_handler
-                            .rendezvous_control_tx
-                            .send(packet_sender::PacketSenderControlMessage::Die)
-                            .unwrap();
-
-                        sender_handle.join().unwrap();
-                        break;
-                    }
-                }
-            }
-        }
-
-        self.packet_receiver_handler
-            .rendezvous_control_tx
-            .send(packet_receiver::PacketReceiverControlMessage::Die)
-            .unwrap();
-
-        self.logger_handler.send(LoggerControlMessage::Die).unwrap();
-
+        sender_handle.join().unwrap();
+        self.packet_receiver_control_tx.send(ThreadControlMessage::Die).unwrap();
         receiver_handle.join().unwrap();
+        self.logger_control_tx.send(ThreadControlMessage::Die).unwrap(); 
         logger_handle.join().unwrap();
+        self.output_control_tx.send(ThreadControlMessage::Die).unwrap(); 
+        output_handle.join().unwrap();
     }
 }

@@ -1,7 +1,8 @@
-use std::{net::Ipv4Addr, thread};
+use std::net::Ipv4Addr;
 
-use super::{cookie::CookieHasher, lcg, logger::LoggerStats, utils::InterfaceData};
-use flume::{bounded, Receiver, Sender};
+use crate::SharedRunState;
+
+use super::{cookie::CookieHasher, lcg, logger::LoggerStats, network_data::InterfaceData};
 use lcg::IPv4Iterator;
 
 use pnet_packet::{ethernet::EtherTypes, ip::IpNextHeaderProtocols, tcp::TcpFlags};
@@ -9,23 +10,13 @@ use pnet_packet::{ethernet::EtherTypes, ip::IpNextHeaderProtocols, tcp::TcpFlags
 use pnet::datalink;
 use pnet::packet;
 
-extern crate pretty_env_logger;
 pub(crate) struct PacketSender {
     ipv4_iterator: IPv4Iterator,
     channel: Box<dyn datalink::DataLinkSender>,
     cookie_hasher: CookieHasher,
-    interface_data: super::utils::InterfaceData,
-    rendezvous_control_rx: Receiver<PacketSenderControlMessage>,
+    interface_data: super::network_data::InterfaceData,
     stats: LoggerStats,
-}
-
-pub(crate) enum PacketSenderControlMessage {
-    Die,
-    Pause,
-}
-
-pub(crate) struct PacketSenderHandler {
-    pub(crate) rendezvous_control_tx: Sender<PacketSenderControlMessage>,
+    run_state: SharedRunState,
 }
 
 impl PacketSender {
@@ -34,7 +25,8 @@ impl PacketSender {
         port: u16,
         interface_data: InterfaceData,
         stats: LoggerStats,
-    ) -> (PacketSender, PacketSenderHandler) {
+        run_state: SharedRunState,
+    ) -> PacketSender {
         let test = pnet::datalink::Config {
             write_buffer_size: 4096,
             read_buffer_size: 4096,
@@ -55,21 +47,14 @@ impl PacketSender {
             _ => panic!(),
         };
 
-        let (rendezvous_control_tx, rendezvous_control_rx) = bounded(0);
-
-        (
-            PacketSender {
-                ipv4_iterator,
-                channel: tx,
-                cookie_hasher,
-                interface_data,
-                rendezvous_control_rx,
-                stats,
-            },
-            PacketSenderHandler {
-                rendezvous_control_tx,
-            },
-        )
+        PacketSender {
+            ipv4_iterator,
+            channel: tx,
+            cookie_hasher,
+            interface_data,
+            stats,
+            run_state,
+        }
     }
 
     fn make_packet(&self, dst_ip: Ipv4Addr, src_port: u16, dst_port: u16, buffer: &mut [u8]) {
@@ -115,16 +100,8 @@ impl PacketSender {
     pub fn send(&mut self) {
         let mut packet_data: [u8; 54] = [0u8; 54];
         while let Some(curr_addr) = self.ipv4_iterator.next() {
-            if let Ok(message) = self.rendezvous_control_rx.try_recv() {
-                match message {
-                    PacketSenderControlMessage::Die => {
-                        return;
-                    }
-                    PacketSenderControlMessage::Pause => {
-                        thread::park();
-                    }
-                }
-            }
+            self.run_state.act_state();
+
             let hash = self.cookie_hasher.get_port_cookie(
                 self.interface_data.device_ip.clone(),
                 curr_addr.ip().clone(),

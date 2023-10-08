@@ -1,7 +1,10 @@
+use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use flume::{Receiver, Sender};
+use crate::SharedRunState;
+
+use super::{ControlRx, ControlTx};
 
 #[derive(Debug, Clone)]
 pub struct Stats {
@@ -20,62 +23,79 @@ impl Stats {
 
 pub type LoggerStats = Arc<Mutex<Stats>>;
 
-pub enum LoggerControlMessage {
-    Die,
-    Pause,
-}
-
 pub struct Logger {
     interval: Duration,
     start: Instant,
     stats: LoggerStats,
-    rendezvous_control_rx: Receiver<LoggerControlMessage>,
+    run_state: SharedRunState,
+    control_rx: ControlRx,
 }
 
-pub type LoggerHandler = Sender<LoggerControlMessage>;
-
 impl Logger {
-    pub fn new() -> (Self, LoggerStats, LoggerHandler) {
+    pub fn new(run_state: SharedRunState) -> (Self, LoggerStats, ControlTx) {
         let stats = Arc::new(Mutex::new(Stats::new()));
 
-        let (rendezvous_control_tx, rendezvous_control_rx) = flume::bounded(0);
+        let (control_tx, control_rx) = channel();
 
         let logger = Logger {
             interval: Duration::new(1, 0),
             start: Instant::now(),
             stats: stats.clone(),
-            rendezvous_control_rx,
+            run_state,
+            control_rx,
         };
 
-        (logger, stats, rendezvous_control_tx)
+        (logger, stats, control_tx)
+    }
+
+    pub fn format_time(duration: &Duration) -> String {
+        let seconds = duration.as_secs();
+        let minutes: u64 = seconds / 60;
+        let hours: u64 = minutes / 60;
+        let days: u64 = hours / 24;
+
+        let mut time = String::new();
+        if days >= 1 {
+            time = time + &format!("{}d ", days);
+        };
+        if hours >= 1 {
+            time = time + &format!("{}h ", hours % 24);
+        };
+        if minutes >= 1 {
+            time = time + &format!("{}m ", minutes % 60);
+        };
+        time = time + &format!("{}s", seconds % 60);
+
+        time
     }
 
     pub fn log(self) {
-        let mut last_log = Instant::now();
+        let mut paused_offset = Duration::new(0, 0);
         loop {
-            if let None = self.interval.checked_sub(Instant::now() - last_log) {
-                let timespan = Instant::now() - self.start;
-                let data = self.stats.lock().unwrap();
-                let hitrate = (data.received as f64 / data.sent as f64) * 100.0;
-                let send_kbps =
-                    (data.sent as f64 / (10u64.pow(3) as f64)) / timespan.as_secs_f64();
-                let recv_ps = data.received as f64 / timespan.as_secs_f64();
+            if *self.run_state.paused.lock().unwrap() {
+                let started = Instant::now();
+                self.run_state.act_state();
+                paused_offset += Instant::now() - started;
+            }
+            if let Ok(_) = self.control_rx.try_recv() {
+                return;
+            }
+            let timespan = Instant::now() - self.start - paused_offset;
 
+            {
+                let data = self.stats.lock().unwrap();
+                let send_kbps = (data.sent as f64 / (10u64.pow(3) as f64)) / timespan.as_secs_f64();
+                let recv_ps = data.received as f64 / timespan.as_secs_f64();
+                let time = Self::format_time(&timespan);
+                let remaining = Self::format_time(&Duration::new(
+                    (((timespan.as_secs() as f64 + 1.0) / ((data.sent as f64) + 1.0)) * ((2 as f64).powf(32.0) - data.sent as f64)) as u64,
+                    0,
+                ));
                 println!(
-                    "{:#?}: Hitrate: {}%; Sent: {:.2} at {} Kp/s; Received: {} at {:.2} p/s",
-                    timespan, hitrate, data.sent, send_kbps, data.received, recv_ps
+                    "{}; Sent: {:.2} at {} Kp/s; Received: {} at {:.2} p/s; left: {}",
+                    time, data.sent, send_kbps, data.received, recv_ps, remaining
                 );
             }
-
-            last_log = Instant::now();
-
-            if let Ok(message) = self.rendezvous_control_rx.try_recv() {
-                match message {
-                    LoggerControlMessage::Die => todo!(),
-                    LoggerControlMessage::Pause => todo!(),
-                }
-            }
-
             std::thread::sleep(self.interval);
         }
     }

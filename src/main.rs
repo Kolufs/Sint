@@ -1,55 +1,96 @@
 #![feature(core_intrinsics)]
 #![feature(ip_bits)]
+#![feature(ascii_char)]
+#![feature(ascii_char_variants)]
+#![feature(allocator_api)]
 
-extern crate pretty_env_logger;
-#[macro_use]
-extern crate log;
-
-use std::fs;
-use std::io::Write;
+use std::io::stdin;
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 use clap::Parser;
+use scan::output::FileOut;
 
 #[derive(Parser, Debug)]
-#[command(term_width = 0)]
+#[command(name = "Sint")]
+#[command(version = "1.0")]
+#[command(about = "Scanner that scans !")]
 struct Args {
-    max_kbps: Option<u32>,
+    /// Output file
+    #[arg(short = 'o', long = "output")]
     output: String,
+    #[arg(short = 'p', long = "port")]
+    /// Port to be scanned
     port: u16,
+    #[arg(short = 'i', long = "interface")]
+    /// Interface to scan on
     interface: Option<String>,
 }
 
 mod scan;
 
-fn main() {
-    pretty_env_logger::init();
+pub struct RunState {
+    pub paused: Mutex<bool>,
+    pub cond: Condvar,
+}
 
+impl RunState {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            paused: Mutex::new(false),
+            cond: Condvar::new(),
+        })
+    }
+
+    pub fn act_state(&self) {
+        if *self.paused.lock().unwrap() {
+            self.cond
+                .wait_while(self.paused.lock().unwrap(), |paused| *paused)
+                .unwrap();
+        }
+    }
+
+    fn toogle(&self) {
+        let mut paused = self.paused.lock().unwrap();
+        self.cond.notify_all();
+        *paused = !*paused;
+    }
+}
+
+type SharedRunState = Arc<RunState>;
+
+fn main() {
     let args = Args::parse();
 
     let interface_data;
     match args.interface {
         Some(interface) => {
-            interface_data = scan::utils::InterfaceData::fetch_from_interface(&interface)
+            interface_data = scan::network_data::InterfaceData::fetch_from_interface(&interface)
         }
-        None => interface_data = scan::utils::InterfaceData::fetch_default(),
+        None => interface_data = scan::network_data::InterfaceData::fetch_default(),
     }
 
-    let (scanner, scanner_handler) = scan::Scanner::new(args.port, interface_data);
+    let run_state = RunState::new();
 
+    let (output, output_handle) = FileOut::new(args.output);
+
+    let scanner = scan::Scanner::new(
+        args.port,
+        interface_data,
+        run_state.clone(),
+        Box::new(output),
+        output_handle,
+    );
     let scan = thread::spawn(|| scanner.scan());
 
-    let mut output_handle = fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(args.output)
-        .unwrap();
+    let stdin = stdin();
 
-    while let Ok(addr) = scanner_handler.product_rx.recv() {
-        output_handle
-            .write(format!("{}\n", addr.to_string()).as_bytes())
-            .unwrap();
+    let mut buf = String::new();
+    loop {
+        stdin.read_line(&mut buf).unwrap();
+        run_state.toogle();
+        if scan.is_finished() {
+            break;
+        }
     }
-
-    scan.join().unwrap();
 }

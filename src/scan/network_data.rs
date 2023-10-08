@@ -2,8 +2,6 @@ use pnet::ipnetwork::IpNetwork;
 use pnet_datalink::MacAddr;
 use std::{fs, net::Ipv4Addr, str::FromStr};
 
-extern crate pretty_env_logger;
-
 #[derive(Clone)]
 pub struct InterfaceData {
     pub iface: pnet_datalink::NetworkInterface,
@@ -79,7 +77,6 @@ impl InterfaceData {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts[0] == ip.to_string() {
                 let mac = MacAddr::from_str(parts[3]).unwrap();
-                debug!("Mapped ip to mac: {}:{:?}", &ip, mac);
                 return Ok(mac);
             }
         }
@@ -99,13 +96,6 @@ impl InterfaceData {
                     | ((ip & 0x0000FF00) << 8)
                     | ((ip & 0x00FF0000) >> 8)
                     | ((ip & 0xFF000000) >> 24);
-
-                debug!(
-                    "Fetched gateway ip 
-                gateway:{}
-                ip:{:?}",
-                    &interface_name, &ip
-                );
 
                 return Some(Ipv4Addr::from(ip));
             }
