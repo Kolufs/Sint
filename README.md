@@ -15,3 +15,4 @@ Options:
 - [ ] AF-XDP Version.
 - [ ] TUI
 - [ ] Gentoo support
+- [ ] CIDR Blacklists
