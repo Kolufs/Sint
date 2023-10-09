@@ -12,7 +12,7 @@ Options:
 ```
 
 ## Todo 
-- [ ] AF-XDP Version.
+- [ ] AF-XDP 
 - [ ] TUI
 - [ ] Gentoo support
 - [ ] CIDR Blacklists
