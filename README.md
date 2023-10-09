@@ -14,3 +14,4 @@ Options:
 ## Todo 
 - [ ] AF-XDP Version.
 - [ ] TUI
+- [ ] Gentoo support
