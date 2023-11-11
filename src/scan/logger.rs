@@ -92,7 +92,7 @@ impl Logger {
                     0,
                 ));
                 println!(
-                    "{}; Sent: {:.2} at {} Kp/s; Received: {} at {:.2} p/s; left: {}",
+                    "{}; Sent: {:.2} at {:.2} Kp/s; Received: {:.2} at {:.2} p/s; left: {}",
                     time, data.sent, send_kbps, data.received, recv_ps, remaining
                 );
             }
